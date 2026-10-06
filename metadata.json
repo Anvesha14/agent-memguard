@@ -1,0 +1,6 @@
+{
+  "name": "MemGuard: Trust-Aware AI Agent Memory & Zero-Trust Layer",
+  "description": "Zero-trust memory security layer with multi-factor trust scoring, cryptographic append-only SHA-256 ledger, DAG blast-radius purge, and action gatekeeper for autonomous AI agents.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

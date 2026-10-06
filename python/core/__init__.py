@@ -1,0 +1,3 @@
+"""
+MemGuard Core Module
+"""
