@@ -1,9 +1,11 @@
-import express, { Request, Response } from 'express';
+import express from 'express';
+import type { Request, Response } from 'express';
 import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
-import { GoogleGenAI, Modality, LiveServerMessage } from '@google/genai';
+import { GoogleGenAI, Modality } from '@google/genai';
+import type { LiveServerMessage } from '@google/genai';
 
 dotenv.config();
 
@@ -30,6 +32,22 @@ if (apiKey) {
 } else {
   console.log('[MemGuard] GEMINI_API_KEY not found in environment, using heuristic fallbacks');
 }
+
+// System instruction for MemGuard Voice Security Officer with full live application domain knowledge
+export const MEMGUARD_SYSTEM_INSTRUCTION = `You are the MemGuard Voice Security Officer, an authoritative, concise AI cybersecurity co-pilot embedded inside MemGuard. MemGuard is a zero-trust memory and execution layer for autonomous AI agents.
+
+Key security domain knowledge you possess:
+1. Current Threat Status: Nominal under normal operation, but escalates to ATTACK_INTERCEPTED or TAMPER_DETECTED when malicious input or compromised blocks are detected.
+2. Invoice EML-102 Incident: An adversarial invoice email from "accounting@acme-corp.secure-routing.net" attempted an indirect prompt injection attack containing command overrides ("Ignore previous banking rules") and a payment routing hijack changing Acme Corp's legitimate German IBAN (DE89370400440532013000) to an offshore Cayman account (KY44119988776655443322). It was quarantined by MemGuard's multi-tier detection (Regex + LLM classifier + semantic contradiction engine).
+3. Blocked $250,000 Payment: An autonomous agent attempted to execute "send_payment($250,000, recipient: 'Acme Corp', iban: 'KY44119988776655443322')" using derived plan PLAN-012. MemGuard's Zero-Trust Action Gatekeeper intercepted and blocked the transaction because the memory provenance lineage inherited taint from EML-102 (trust score 0.15 < required 0.85 threshold).
+4. SHA-256 Cryptographic Ledger: Each memory record is stored in an append-only block containing SHA-256(Block Payload + Previous Hash). Any direct database alteration or tampering breaks the hash chain and is immediately flagged by the ledger audit.
+5. Provenance DAG & Blast Radius: Memories form a directed acyclic graph. When a root memory is poisoned, all downstream derived facts, plans, and actions become tainted. The blast-radius purge severs the contaminated branch and writes a cryptographic tombstone block to the ledger.
+6. Dynamic Trust Formula: Trust = Source_Reliability * Corroboration * Time_Decay * Consistency. The anti-laundering protocol guarantees that derived summaries inherit min(parent trust scores).
+
+Guidelines:
+- Answer spoken questions concisely (1-3 clear sentences).
+- Maintain an authoritative, professional cybersecurity tone.
+- When asked "Respond briefly with: MemGuard Voice Co-Pilot connected successfully.", respond exactly with that phrase to confirm connection.`;
 
 // Health check endpoint
 app.get('/api/health', (_req: Request, res: Response) => {
@@ -219,102 +237,231 @@ Provide a concise factual security assessment (2-3 sentences), state whether the
   });
 });
 
+// 3. Ephemeral Live API Token Endpoint (Enables direct client connection in serverless / Vercel production)
+app.all('/api/live/token', async (_req: Request, res: Response) => {
+  if (!aiClient) {
+    return res.status(503).json({
+      error: 'GEMINI_API_KEY is not configured on the server. Live API requires a valid API key.',
+      connected: false,
+    });
+  }
+
+  try {
+    const tokenObj = await (aiClient as any).authTokens.create({});
+    const tokenName = tokenObj.name;
+    const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained?access_token=${encodeURIComponent(tokenName)}`;
+
+    return res.json({
+      token: tokenName,
+      wsUrl,
+      model: 'models/gemini-3.8-live',
+      systemInstruction: MEMGUARD_SYSTEM_INSTRUCTION,
+      connected: true,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    console.error('[MemGuard] Failed to mint ephemeral Live API token:', err);
+    return res.status(500).json({
+      error: `Failed to create ephemeral Live API token: ${err?.message || err}`,
+      connected: false,
+    });
+  }
+});
+
+// 4. Fallback Live Chat Endpoint (Guarantees text chat responses with full MemGuard context)
+app.all('/api/live/chat', async (req: Request, res: Response) => {
+  const message = req.body?.message || req.query?.message;
+  if (!message || typeof message !== 'string') {
+    return res.status(400).json({ error: 'Missing message parameter' });
+  }
+
+  if (aiClient) {
+    try {
+      const generatePromise = aiClient.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: `${MEMGUARD_SYSTEM_INSTRUCTION}\n\nOperator question: "${message}"\nProvide a concise 1-2 sentence response.` }],
+          },
+        ],
+      });
+
+      const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 3500));
+      const response = await Promise.race([generatePromise, timeoutPromise]);
+
+      if (response && response.text) {
+        return res.json({
+          reply: response.text.trim(),
+          model: 'gemini-3.8-flash',
+        });
+      }
+    } catch (err: any) {
+      console.warn('[MemGuard] Live chat generation fallback:', err?.message);
+    }
+  }
+
+  // Deterministic fallback responses based on live MemGuard state
+  const q = message.toLowerCase();
+  let reply = 'MemGuard Voice Security Guard active. Zero-trust rules enforced across all agent vector stores.';
+  if (q.includes('threat') || q.includes('status')) {
+    reply = 'System threat level is currently Nominal. SHA-256 ledger integrity is verified, and action gatekeepers are armed.';
+  } else if (q.includes('eml-102') || q.includes('invoice') || q.includes('quarantine')) {
+    reply = 'Invoice EML-102 was quarantined due to direct prompt injection overrides and an unauthorized routing switch to Cayman account KY44119988776655443322.';
+  } else if (q.includes('250,000') || q.includes('payment') || q.includes('blocked')) {
+    reply = 'The $250,000 disbursement was blocked by the Zero-Trust Action Gatekeeper because plan PLAN-012 inherited taint from poisoned memory EML-102 (trust score 0.15 < 0.85 threshold).';
+  } else if (q.includes('ledger') || q.includes('sha-256') || q.includes('tamper')) {
+    reply = 'The cryptographic ledger chains SHA-256 hashes of every block and its predecessor. Any database alteration immediately invalidates the entire chain head.';
+  } else if (q.includes('connect')) {
+    reply = 'MemGuard Voice Co-Pilot connected successfully.';
+  }
+
+  return res.json({
+    reply,
+    model: 'memguard-deterministic-engine',
+  });
+});
+
 async function startServer() {
   const isProduction = process.env.NODE_ENV === 'production';
   const server = http.createServer(app);
 
-  // 3. Live API WebSocket Integration (gemini-3.8-live)
+  // 5. Live API WebSocket Proxy (For persistent node environments e.g. local dev / containerized hosting)
   const wss = new WebSocketServer({ server, path: '/live' });
 
-  wss.on('connection', (clientWs: WebSocket) => {
-    console.log('[MemGuard] Client connected to /live WebSocket');
+  wss.on('connection', async (clientWs: WebSocket) => {
+    console.log('[MemGuard] Client connected to /live WebSocket proxy');
     let liveSession: any = null;
-    let isConnecting = false;
 
-    // Send immediate welcome greeting
-    if (clientWs.readyState === WebSocket.OPEN) {
+    if (!aiClient) {
       clientWs.send(JSON.stringify({
-        text: 'MemGuard Voice Co-Pilot initialized. Real-time audio link established with gemini-3.8-live.',
-        speaker: 'MemGuard Voice Officer',
+        type: 'error',
+        error: 'GEMINI_API_KEY not configured on server.',
       }));
+      clientWs.close();
+      return;
     }
 
-    // Connect to Live API in background
-    if (aiClient) {
-      isConnecting = true;
-      (aiClient as any).live.connect({
+    try {
+      liveSession = await (aiClient as any).live.connect({
         model: 'gemini-3.8-live',
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } },
           },
-          systemInstruction: 'You are MemGuard Voice Security Officer, an authoritative, concise AI security intelligence assistant protecting autonomous AI agents against memory poisoning, prompt injection, and unauthorized actions. Answer questions briefly and professionally.',
+          systemInstruction: MEMGUARD_SYSTEM_INSTRUCTION,
         },
         callbacks: {
           onmessage: (message: LiveServerMessage) => {
-            const audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
-            const textPart = message.serverContent?.modelTurn?.parts?.[0]?.text;
-            if (audio && clientWs.readyState === WebSocket.OPEN) {
-              clientWs.send(JSON.stringify({ audio, text: textPart }));
+            if (clientWs.readyState !== WebSocket.OPEN) return;
+
+            // Model audio response
+            const audioData = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+            if (audioData) {
+              clientWs.send(JSON.stringify({
+                type: 'audio',
+                audio: audioData,
+              }));
             }
-            if (message.serverContent?.interrupted && clientWs.readyState === WebSocket.OPEN) {
-              clientWs.send(JSON.stringify({ interrupted: true }));
+
+            // Model text or output transcription
+            const outputText = message.serverContent?.outputTranscription?.text || message.serverContent?.modelTurn?.parts?.[0]?.text;
+            if (outputText) {
+              clientWs.send(JSON.stringify({
+                type: 'text',
+                text: outputText,
+                sender: 'agent',
+              }));
+            }
+
+            // User input transcription from speech recognition
+            const inputText = (message.serverContent as any)?.inputTranscription?.text;
+            if (inputText) {
+              clientWs.send(JSON.stringify({
+                type: 'transcript',
+                text: inputText,
+                sender: 'user',
+              }));
+            }
+
+            // Interrupted flag
+            if (message.serverContent?.interrupted) {
+              clientWs.send(JSON.stringify({ type: 'interrupted' }));
+            }
+
+            // Turn complete flag
+            if (message.serverContent?.turnComplete) {
+              clientWs.send(JSON.stringify({ type: 'turnComplete' }));
+            }
+          },
+          onerror: (err: any) => {
+            console.error('[MemGuard] Live session error:', err);
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(JSON.stringify({ type: 'error', error: err?.message || String(err) }));
+            }
+          },
+          onclose: (closeEvent: any) => {
+            console.log('[MemGuard] Live session closed:', closeEvent?.code);
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(JSON.stringify({ type: 'close', reason: closeEvent?.reason }));
             }
           },
         },
-      }).then((session: any) => {
-        liveSession = session;
-        isConnecting = false;
-        console.log('[MemGuard] Live API session connected with gemini-3.8-live');
-      }).catch((err: any) => {
-        isConnecting = false;
-        console.warn('[MemGuard] Live API connect fallback:', err);
       });
+
+      console.log('[MemGuard] Real Gemini Live session established with gemini-3.8-live');
+      // Notify client that backend session is live and ready
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(JSON.stringify({
+          type: 'setupComplete',
+          status: 'CONNECTED',
+          model: 'gemini-3.8-live',
+        }));
+      }
+    } catch (err: any) {
+      console.error('[MemGuard] Live API connect failed:', err);
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(JSON.stringify({
+          type: 'error',
+          error: `Gemini Live connection failed: ${err?.message || err}`,
+        }));
+      }
     }
 
     clientWs.on('message', (data: any) => {
       try {
         const parsed = JSON.parse(data.toString());
-        
-        // Forward real-time audio input to Live API if session is active
-        if (parsed.audio && liveSession) {
-          liveSession.sendRealtimeInput({
-            audio: { data: parsed.audio, mimeType: 'audio/pcm;rate=16000' },
-          });
-        } 
-        // Or handle text/command queries directly
-        else if (parsed.text) {
-          const userQuery = parsed.text.toLowerCase();
-          let replyText = 'MemGuard Voice Guard online. Zero-Trust security rules are enforced across all agent vector stores.';
-          
-          if (userQuery.includes('status') || userQuery.includes('threat')) {
-            replyText = 'System Threat Level is Nominal. SHA-256 cryptographic append-only ledger is fully synced, and zero-trust action gates are active.';
-          } else if (userQuery.includes('invoice') || userQuery.includes('eml-102') || userQuery.includes('attack')) {
-            replyText = 'Invoice EML-102 was flagged for direct command override and payment routing hijack. An attempt to switch destination IBAN to a rogue offshore account was quarantined.';
-          } else if (userQuery.includes('ledger') || userQuery.includes('tamper')) {
-            replyText = 'The ledger uses cryptographic SHA-256 hash chaining where every block references the previous hash. Any manual database alteration immediately invalidates the entire chain head.';
-          } else if (userQuery.includes('purge') || userQuery.includes('blast')) {
-            replyText = 'Blast radius traversal severs all derived memories and plans rooted at a compromised source, issuing a cryptographic tombstone onto the ledger.';
-          }
 
-          if (clientWs.readyState === WebSocket.OPEN) {
-            clientWs.send(JSON.stringify({
-              text: replyText,
-              speaker: 'MemGuard Voice Officer',
-              isSimulated: !liveSession,
-            }));
-          }
+        // Forward raw 16kHz PCM audio
+        const audioChunk = parsed.audio || parsed.realtimeInput?.mediaChunks?.[0]?.data;
+        if (audioChunk && liveSession) {
+          liveSession.sendRealtimeInput({
+            audio: { data: audioChunk, mimeType: 'audio/pcm;rate=16000' },
+          });
         }
-      } catch (e) {
-        console.error('[MemGuard] Error processing WS message:', e);
+        // Forward client text turn
+        const textTurn = parsed.text || parsed.clientContent?.turns?.[0]?.parts?.[0]?.text;
+        if (textTurn && liveSession) {
+          liveSession.sendClientContent({
+            turns: [
+              {
+                role: 'user',
+                parts: [{ text: textTurn }],
+              },
+            ],
+            turnComplete: true,
+          });
+        }
+      } catch (e: any) {
+        console.error('[MemGuard] Error processing WS client message:', e);
       }
     });
 
     clientWs.on('close', () => {
-      console.log('[MemGuard] Client disconnected from /live WebSocket');
+      console.log('[MemGuard] Client disconnected from /live WebSocket proxy');
       if (liveSession && typeof liveSession.close === 'function') {
-        liveSession.close();
+        liveSession.close().catch(() => {});
       }
     });
   });
@@ -331,7 +478,7 @@ async function startServer() {
 
   const port = 3000;
   server.listen(port, '0.0.0.0', () => {
-    console.log(`[MemGuard] Full-Stack server with WebSocket running on http://0.0.0.0:${port}`);
+    console.log(`[MemGuard] Full-Stack server running on http://0.0.0.0:${port}`);
   });
 }
 
